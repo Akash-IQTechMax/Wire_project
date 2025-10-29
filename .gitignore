@@ -1,2 +1,4 @@
 /ex/
 /__pycache__/
+/results/*
+/uploads/*

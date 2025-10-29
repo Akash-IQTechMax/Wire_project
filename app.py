@@ -1,9 +1,9 @@
 from flask import Flask, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
 import os
+import time
 from datetime import datetime
-import csv
-from deviation_check import analyze_single_image  # your OpenCV logic file
+from deviation_check import analyze_all  # updated import
 
 # --------------------------------------------
 # CONFIG
@@ -36,86 +36,65 @@ def upload_image():
     print(f"✅ Uploaded: {filename}")
     return jsonify({"status": "success", "filename": filename}), 200
 
+
 # --------------------------------------------
-# ANALYSIS ENDPOINT
+# ANALYSIS ENDPOINT (with duration logs)
 # --------------------------------------------
 @app.route('/analyze', methods=['GET'])
 def analyze_all_images():
-    """Analyze the latest 6 uploaded images."""
-    image_files = sorted(
-        [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith(".png")],
-        key=lambda x: os.path.getmtime(os.path.join(UPLOAD_FOLDER, x)),
-        reverse=True
-    )[:6]
+    """Run the latest wire deviation analysis (6 images + 3D deviation)."""
+    start_time = time.time()
+    print("\n🚀 Starting wire deviation analysis...")
+    print(f"🕒 Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    if not image_files:
-        return jsonify({"status": "error", "message": "No images found"}), 404
+    try:
+        # Trigger analysis (auto-calibration + averaging)
+        analyze_all()
 
-    all_results = []
-    total_length = 0.0
-    total_diameter = 0.0
-    total_deviation = 0.0
+        # Get the most recent results folder
+        folders = sorted(
+            [os.path.join(RESULTS_DIR, f) for f in os.listdir(RESULTS_DIR) if os.path.isdir(os.path.join(RESULTS_DIR, f))],
+            key=os.path.getmtime,
+            reverse=True
+        )
+        if not folders:
+            print("⚠️ No result folders found after analysis.")
+            return jsonify({"status": "error", "message": "No results found"}), 404
 
-    for img_name in image_files:
-        try:
-            img_path = os.path.join(UPLOAD_FOLDER, img_name)
-            result = analyze_single_image(img_path, RESULTS_DIR, return_json=True)
-            all_results.append(result)
+        latest_folder = folders[0]
+        summary_path = os.path.join(latest_folder, "average_summary.txt")
+        csv_path = os.path.join(latest_folder, "wire_analysis_results.csv")
 
-            total_length += float(result["length_mm"])
-            total_diameter += float(result.get("diameter_mm", 0))
-            total_deviation += float(result["deviation_mm"])
+        # Read summary text
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary_text = f.read()
 
-            print(f"✅ Analyzed {img_name}: {result}")
-        except Exception as e:
-            print(f"❌ Error analyzing {img_name}: {e}")
+        elapsed_time = time.time() - start_time
+        print(f"✅ Analysis completed successfully in {elapsed_time:.2f} seconds.")
+        print(f"📂 Results Folder: {latest_folder}")
+        print(f"📄 Summary File: {summary_path}")
+        print(f"📊 CSV File: {csv_path}")
 
-    # ----------------------------------------
-    # CALCULATE AVERAGES
-    # ----------------------------------------
-    count = len(all_results)
-    avg_length = total_length / count if count else 0
-    avg_diameter = total_diameter / count if count else 0
-    avg_deviation = total_deviation / count if count else 0
+        return jsonify({
+            "status": "success",
+            "summary": summary_text,
+            "processing_time_sec": round(elapsed_time, 2),
+            "summary_file": f"/results/{os.path.basename(latest_folder)}/average_summary.txt",
+            "csv_file": f"/results/{os.path.basename(latest_folder)}/wire_analysis_results.csv"
+        }), 200
 
-    summary_text = (
-        "=== SUMMARY OF RESULTS ===\n"
-        f"Average Wire Length Across All Views: {avg_length:.6f} mm\n"
-        f"Average Wire Diameter: {avg_diameter:.6f} mm\n"
-        f"Average Length Deviation from AR Model: {avg_deviation:.6f} mm"
-    )
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        print(f"❌ Error during analysis after {elapsed_time:.2f} seconds: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "processing_time_sec": round(elapsed_time, 2)
+        }), 500
 
-    # ----------------------------------------
-    # SAVE CSV SUMMARY
-    # ----------------------------------------
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    csv_path = os.path.join(RESULTS_DIR, f"summary_{timestamp}.csv")
-    with open(csv_path, "w", newline="") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=["filename", "length_mm", "angle_deg", "direction", "deviation_mm"])
-        writer.writeheader()
-        for row in all_results:
-            writer.writerow({
-                "filename": row["filename"],
-                "length_mm": row["length_mm"],
-                "angle_deg": row["angle_deg"],
-                "direction": row["direction"],
-                "deviation_mm": row["deviation_mm"]
-            })
-
-    print("✅ Summary CSV saved:", csv_path)
-
-    # ----------------------------------------
-    # RETURN JSON TO UNITY
-    # ----------------------------------------
-    return jsonify({
-        "status": "success",
-        "summary": summary_text,
-        "csv_path": f"/results/summary_{timestamp}.csv",
-        "results": all_results
-    }), 200
 
 # --------------------------------------------
-# STATIC FILES
+# STATIC FILE ROUTES
 # --------------------------------------------
 @app.route('/results/<path:filename>')
 def serve_results(filename):
@@ -124,6 +103,7 @@ def serve_results(filename):
 @app.route('/uploads/<path:filename>')
 def serve_uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
+
 
 # --------------------------------------------
 # RUN SERVER
