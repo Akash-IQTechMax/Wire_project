@@ -10,7 +10,7 @@ from datetime import datetime
 # CONFIGURATION
 # ============================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "updateduploads")
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 REFERENCE_IMAGE_PATH = os.path.join(BASE_DIR, "wire_reference.png")
 
