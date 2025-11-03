@@ -10,7 +10,7 @@ from datetime import datetime
 # CONFIGURATION
 # ============================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "updateduploads")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 REFERENCE_IMAGE_PATH = os.path.join(BASE_DIR, "wire_reference.png")
 
@@ -218,7 +218,7 @@ def analyze_all():
         "β Avg. Real Wire Tilt Angle (From X-axis)": f"{avg_angle:.2f}°",
         "Avg. Real Wire Orientation": avg_orientation,
         "Avg. Length Deviation": f"{avg_dev_len:.3f} mm",
-        "Avg. 3D Spatial Deviation": f"{avg_3d_dev:.3f} mm",
+        "Avg. 3D Spatial Deviation": f"{avg_3d_dev/10:.3f} mm",
         "Avg. Angular Deviation": f"{avg_angle_dev:.3f}°",
         "Avg. Real Wire Endpoint Deviation": f"({avg_x1:.3f}, {avg_y1:.3f}, {avg_z1:.3f})",
         "Avg. Overlay Wire Endpoint Deviation": f"({avg_x2:.3f}, {avg_y2:.3f}, {avg_z2:.3f})",
