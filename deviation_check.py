@@ -278,6 +278,16 @@ COLOR_LOWER = np.array([5, 80, 50])
 COLOR_UPPER = np.array([25, 255, 255])
 
 
+def count_bends(contour, epsilon_factor=0.01):
+    """Approximate contour and count number of bend points."""
+    epsilon = epsilon_factor * cv2.arcLength(contour, True)
+    approx = cv2.approxPolyDP(contour, epsilon, True)
+
+    # Bends = number of significant direction changes
+    bend_count = len(approx) - 2 if len(approx) > 2 else 0
+    return bend_count
+
+
 # ============================================================
 # FUNCTION: Analyze a single wire
 # ============================================================
@@ -312,11 +322,15 @@ def analyze_wire(image_path):
 
     tilt_direction = "Positive" if angle_deg >= 0 else "Negative"
 
+    # Count number of bends
+    bend_count = count_bends(contour)
+
     return {
         "image": os.path.basename(image_path),
         "length_mm": float(length_mm),
         "angle_deg": float(angle_deg),
-        "tilt_direction": tilt_direction
+        "tilt_direction": tilt_direction,
+        "bend_count": bend_count
     }
 
 
@@ -329,10 +343,13 @@ def compute_averages(results):
 
     lengths = [r["length_mm"] for r in results]
     angles = [r["angle_deg"] for r in results]
+    bends = [r["bend_count"] for r in results]
 
     avg_length = np.mean(lengths)
     avg_angle = np.mean(angles)
+    avg_bends = np.mean(bends)
     avg_3d_dev = np.std(lengths)
+
 
     pos_tilts = sum(1 for r in results if r["tilt_direction"] == "Positive")
     neg_tilts = sum(1 for r in results if r["tilt_direction"] == "Negative")
@@ -351,6 +368,7 @@ def compute_averages(results):
         "Average Bent Wire Length": f"{avg_length:.3f} mm",
         "Average Tilt Angle": f"{avg_angle:.2f}° ({tilt_summary})",
         "Average 3D Deviation": f"{avg_3d_dev:.3f} mm",
+        "Average Bend Count": f"{avg_bends:.1f} bends",
         "---": "----------------------------------------",
         "Avg. Real Wire Length": f"{avg_real_length:.3f} mm",
         "β Avg. Real Wire Tilt Angle (From X-axis)": f"{avg_real_angle:.2f}°",
@@ -392,13 +410,13 @@ def analyze_all():
 
     # Write summary text
     summary_path = os.path.join(result_dir, "average_summary.txt")
-    with open(summary_path, "w") as f:
+    with open(summary_path, "w", encoding="utf-8") as f:
         for k, v in summary.items():
             f.write(f"{k}: {v}\n")
 
     # Write CSV
     csv_path = os.path.join(result_dir, "wire_analysis_results.csv")
-    with open(csv_path, "w", newline="") as csvfile:
+    with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Metric", "Value"])
         for k, v in summary.items():

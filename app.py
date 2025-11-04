@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from werkzeug.utils import secure_filename
 import os
 import time
 from datetime import datetime
 from deviation_check import analyze_all  # updated import
+import json
 
 # --------------------------------------------
 # CONFIG
@@ -37,6 +38,15 @@ def upload_image():
     return jsonify({"status": "success", "filename": filename}), 200
 
 
+def parse_summary_text_to_json(file_path):
+    data = {}
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if ":" in line:
+                key, value = line.strip().split(":", 1)
+                data[key.strip()] = value.strip()
+    return data
+
 # --------------------------------------------
 # ANALYSIS ENDPOINT (with duration logs)
 # --------------------------------------------
@@ -64,10 +74,8 @@ def analyze_all_images():
         latest_folder = folders[0]
         summary_path = os.path.join(latest_folder, "average_summary.txt")
         csv_path = os.path.join(latest_folder, "wire_analysis_results.csv")
-
-        # Read summary text
-        with open(summary_path, "r", encoding="utf-8") as f:
-            summary_text = f.read()
+            
+        summary_json = parse_summary_text_to_json(summary_path)
 
         elapsed_time = time.time() - start_time
         print(f"✅ Analysis completed successfully in {elapsed_time:.2f} seconds.")
@@ -75,13 +83,18 @@ def analyze_all_images():
         print(f"📄 Summary File: {summary_path}")
         print(f"📊 CSV File: {csv_path}")
 
-        return jsonify({
+        response_data = {
             "status": "success",
-            "summary": summary_text,
+            "summary": summary_json,
             "processing_time_sec": round(elapsed_time, 2),
             "summary_file": f"/results/{os.path.basename(latest_folder)}/average_summary.txt",
             "csv_file": f"/results/{os.path.basename(latest_folder)}/wire_analysis_results.csv"
-        }), 200
+        }
+        
+        return Response(
+            json.dumps(response_data, ensure_ascii=False, indent=4),
+            mimetype="application/json"
+        ), 200
 
     except Exception as e:
         elapsed_time = time.time() - start_time
