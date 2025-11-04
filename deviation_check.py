@@ -263,247 +263,126 @@ from datetime import datetime
 # ============================================================
 # CONFIGURATION
 # ============================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-RESULTS_DIR = os.path.join(BASE_DIR, "results")
-REFERENCE_IMAGE_PATH = os.path.join(BASE_DIR, "wire_reference.png")
+IMAGE_PATH = "wire_reference.png"   # Change to your input image
+OUTPUT_DIR = "output_wire"
+PIXEL_TO_MM = 0.26  # Scale factor: 1 px ≈ 0.26 mm
+REFERENCE_LENGTH_MM = 10.0  # Replace with your reference wire length
 
-os.makedirs(RESULTS_DIR, exist_ok=True)
-
-REFERENCE_LENGTH_MM = 12.0        # fixed AR wire length (1.2 cm)
-COLOR_LOWER = np.array([5, 80, 50])
-COLOR_UPPER = np.array([25, 255, 255])
-
-PIXELS_PER_MM = None
-
-# ---- Fixed Unity overlay angles (degrees) ----
-UNITY_ANGLES = {
-    "X": 44.1,
-    "Y": 45.7,
-    "Z": 89.8
-}
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ============================================================
-# CALIBRATION
-# ============================================================
-def calibrate_reference():
-    """Calibrate using reference image."""
-    global PIXELS_PER_MM
-
-    img = cv2.imread(REFERENCE_IMAGE_PATH)
-    if img is None:
-        print("❌ Missing reference image for calibration.")
-        return False
-
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, COLOR_LOWER, COLOR_UPPER)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        print("⚠️ No contour found in reference image — using adaptive color range.")
-        h, s, v = cv2.split(hsv)
-        lower = np.array([np.percentile(h, 5), np.percentile(s, 5), np.percentile(v, 5)], dtype=np.uint8)
-        upper = np.array([np.percentile(h, 95), np.percentile(s, 95), np.percentile(v, 95)], dtype=np.uint8)
-        mask = cv2.inRange(hsv, lower, upper)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            print("❌ Still no contour found. Calibration failed.")
-            return False
-
-    c = max(contours, key=cv2.contourArea)
-    _, (w, h), _ = cv2.minAreaRect(c)
-    PIXELS_PER_MM = max(w, h) / REFERENCE_LENGTH_MM
-    print(f"✅ Calibrated: 1 mm = {PIXELS_PER_MM:.3f} px  |  1 px = {1/PIXELS_PER_MM:.6f} mm")
-    return True
-
-# ============================================================
-# ANALYZE SINGLE IMAGE
+# HELPER FUNCTION: Measure tilt & bent length
 # ============================================================
 def analyze_wire_image(path):
+    print(f"\n[INFO] Processing: {path}")
     img = cv2.imread(path)
     if img is None:
-        print(f"❌ Cannot read {path}")
-        return None
+        raise ValueError(f"❌ Could not open image: {path}")
 
+    # Convert to HSV for wire detection
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, COLOR_LOWER, COLOR_UPPER)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    lower = np.array([0, 0, 50])
+    upper = np.array([179, 80, 255])
+    mask = cv2.inRange(hsv, lower, upper)
 
-    # Adaptive color fallback if no contours found
-    if not contours:
-        h, s, v = cv2.split(hsv)
-        lower = np.array([np.percentile(h, 5), np.percentile(s, 5), np.percentile(v, 5)], dtype=np.uint8)
-        upper = np.array([np.percentile(h, 95), np.percentile(s, 95), np.percentile(v, 95)], dtype=np.uint8)
-        mask = cv2.inRange(hsv, lower, upper)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Morphological cleanup
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
 
+    # Find contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
-        print(f"⚠️ No wire detected in {os.path.basename(path)}")
+        print("⚠️ No wire detected.")
         return None
 
+    # Find largest contour (assumed wire)
     cnt = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(cnt) < 100:
+        print("⚠️ Wire too small to analyze.")
+        return None
 
-    # ============================================================
-    # ✅ Signed angle + real arc length for bent wire
-    # ============================================================
+    # Draw contour
+    cv2.drawContours(img, [cnt], -1, (0, 255, 0), 2)
+
+    # Fit a straight line for tilt detection
     [vx, vy, x0, y0] = cv2.fitLine(cnt, cv2.DIST_L2, 0, 0.01, 0.01)
     vx, vy = float(vx), float(vy)
     angle_rad = math.atan2(vy, vx)
     angle_deg = math.degrees(angle_rad)
-    if angle_deg > 180:
-        angle_deg -= 360  # Normalize to [-180, 180]
 
-    # Actual contour length (handles bends)
-    wire_length_px = cv2.arcLength(cnt, closed=False)
-    wire_length_mm = wire_length_px / PIXELS_PER_MM
+    # ✅ Determine tilt direction and signed angle
+    tilt_direction = "Upward" if vy < 0 else "Downward"
+    tilt_value = angle_deg if tilt_direction == "Upward" else -angle_deg
+
+    # ✅ Compute bent wire length (curve-based)
+    wire_length_px = cv2.arcLength(cnt, False)
+    wire_length_mm = wire_length_px * PIXEL_TO_MM
     deviation_len = abs(wire_length_mm - REFERENCE_LENGTH_MM)
 
-    # Orientation (signed)
-    if -5 <= angle_deg <= 5:
-        orientation = "Horizontal"
-    elif angle_deg > 5:
-        orientation = f"Tilted Up (+{angle_deg:.1f}°)"
-    elif angle_deg < -5:
-        orientation = f"Tilted Down ({angle_deg:.1f}°)"
-    else:
-        orientation = "Unknown"
+    # ✅ Compute small 3D deviation estimate (example placeholder)
+    deviation_3d = deviation_len * math.sin(abs(angle_rad))
 
-    # ------------------------------------------------------------
-    # 3D vector calculation
-    # ------------------------------------------------------------
-    overlay_len = REFERENCE_LENGTH_MM
-    a1, a2, a3 = map(math.radians, [UNITY_ANGLES["X"], UNITY_ANGLES["Y"], UNITY_ANGLES["Z"]])
-    x2 = overlay_len * math.cos(a1)
-    y2 = overlay_len * math.cos(a2)
-    z2 = overlay_len * math.cos(a3)
+    # Draw line on image (for AR/VR overlay)
+    pt1 = (int(x0 - vx * 200), int(y0 - vy * 200))
+    pt2 = (int(x0 + vx * 200), int(y0 + vy * 200))
+    cv2.line(img, pt1, pt2, (255, 0, 0), 2)
 
-    # Real wire vector
-    b1 = math.radians(angle_deg)
-    x1 = wire_length_mm * math.cos(b1)
-    y1 = wire_length_mm * math.sin(b1)
-    z1 = 0
+    # Overlay text on image
+    cv2.putText(img, f"Tilt: {tilt_value:.2f}° ({tilt_direction})", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(img, f"Length: {wire_length_mm:.2f} mm", (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(img, f"3D Dev: {deviation_3d:.3f} mm", (10, 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-    dx = x2 - x1
-    dy = y2 - y1
-    dz = z2 - z1
+    # Save output image
+    output_path = os.path.join(OUTPUT_DIR, f"result_{os.path.basename(path)}")
+    cv2.imwrite(output_path, img)
 
-    deviation_3d = math.sqrt(dx**2 + dy**2 + dz**2)
-    angle_dev = abs(angle_deg - UNITY_ANGLES["X"])
+    # ✅ Print in terminal
+    print(f"[INFO] {os.path.basename(path)} | "
+          f"Tilt: {tilt_value:.2f}° ({tilt_direction}) | "
+          f"Length: {wire_length_mm:.2f} mm | 3D Dev: {deviation_3d:.3f} mm")
 
-    # ------------------------------------------------------------
-    # Annotate image
-    # ------------------------------------------------------------
-    annotated = img.copy()
-    box = np.intp(cv2.boxPoints(cv2.minAreaRect(cnt)))
-    cv2.drawContours(annotated, [box], 0, (0, 255, 0), 2)
-
-    text1 = f"Len: {wire_length_mm:.2f}mm | Angle: {angle_deg:.2f}°"
-    text2 = f"3D Dev: {deviation_3d:.3f}mm | ΔAngle: {angle_dev:.2f}°"
-    cv2.putText(annotated, text1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    cv2.putText(annotated, text2, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    cv2.putText(annotated, orientation, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-
-    out_path = os.path.join(RESULTS_DIR, f"annotated_{os.path.basename(path)}")
-    cv2.imwrite(out_path, annotated)
-
-    # ------------------------------------------------------------
-    # Return structured results
-    # ------------------------------------------------------------
-    result = {
+    # Return all values for CSV & TXT output
+    return {
         "file": os.path.basename(path),
-        "length_mm": round(wire_length_mm, 3),
-        "angle_deg": round(angle_deg, 2),
-        "orientation": orientation,
-        "deviation_len_mm": round(deviation_len, 3),
-        "3D_deviation_mm": round(deviation_3d, 3),
-        "angle_deviation_deg": round(angle_dev, 3),
-        "wire_tip_real": {"x1": round(x1, 4), "y1": round(y1, 4), "z1": round(z1, 4)},
-        "overlay_tip": {"x2": round(x2, 4), "y2": round(y2, 4), "z2": round(z2, 4)},
-        "delta": {"dx": round(dx, 4), "dy": round(dy, 4), "dz": round(dz, 4)}
+        "length_mm": round(wire_length_mm, 2),
+        "tilt_value_deg": round(tilt_value, 2),
+        "tilt_direction": tilt_direction,
+        "3D_deviation_mm": round(deviation_3d, 3)
     }
 
-    print(f"[INFO] {os.path.basename(path)} | Angle: {angle_deg:.2f}° | 3D Dev: {deviation_3d:.3f} mm")
-    return result
-
 # ============================================================
-# ANALYZE MULTIPLE IMAGES AND AVERAGE
+# MAIN PROCESS
 # ============================================================
-def analyze_all():
-    if not calibrate_reference():
-        print("❌ Calibration failed.")
-        return
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder = os.path.join(RESULTS_DIR, timestamp)
-    os.makedirs(folder, exist_ok=True)
-
-    files = sorted(
-        [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith((".png", ".jpg", ".jpeg"))],
-        key=lambda x: os.path.getmtime(os.path.join(UPLOAD_FOLDER, x)),
-        reverse=True
-    )[:6]
-
+def main():
     results = []
-    for f in files:
-        fp = os.path.join(UPLOAD_FOLDER, f)
-        res = analyze_wire_image(fp)
-        if res:
-            results.append(res)
+    txt_output = os.path.join(OUTPUT_DIR, "results.txt")
+    csv_output = os.path.join(OUTPUT_DIR, "results.csv")
 
-    if not results:
-        print("❌ No valid images processed.")
-        return
-
-    # ---- Compute averages ----
-    avg_length = np.mean([r["length_mm"] for r in results])
-    avg_angle = np.mean([r["angle_deg"] for r in results])
-    avg_dev_len = np.mean([r["deviation_len_mm"] for r in results])
-    avg_3d_dev = np.mean([r["3D_deviation_mm"] for r in results])
-    avg_angle_dev = np.mean([r["angle_deviation_deg"] for r in results])
-
-    orientations = [r["orientation"].split()[0] for r in results]
-    avg_orientation = max(set(orientations), key=orientations.count)
-
-    avg_x1 = np.mean([r["wire_tip_real"]["x1"] for r in results])
-    avg_y1 = np.mean([r["wire_tip_real"]["y1"] for r in results])
-    avg_z1 = np.mean([r["wire_tip_real"]["z1"] for r in results])
-
-    avg_x2 = np.mean([r["overlay_tip"]["x2"] for r in results])
-    avg_y2 = np.mean([r["overlay_tip"]["y2"] for r in results])
-    avg_z2 = np.mean([r["overlay_tip"]["z2"] for r in results])
-
-    avg_dx = np.mean([r["delta"]["dx"] for r in results])
-    avg_dy = np.mean([r["delta"]["dy"] for r in results])
-    avg_dz = np.mean([r["delta"]["dz"] for r in results])
-
-    averages = {
-        "Avg. Real Wire Length": f"{avg_length:.3f} mm",
-        "β Avg. Real Wire Tilt Angle (From X-axis)": f"{avg_angle:.2f}°",
-        "Avg. Real Wire Orientation": avg_orientation,
-        "Avg. Length Deviation": f"{avg_dev_len:.3f} mm",
-        "Avg. 3D Spatial Deviation": f"{avg_3d_dev/10:.3f} mm",
-        "Avg. Angular Deviation": f"{avg_angle_dev:.3f}°",
-        "Avg. Real Wire Endpoint Deviation": f"({avg_x1:.3f}, {avg_y1:.3f}, {avg_z1:.3f})",
-        "Avg. Overlay Wire Endpoint Deviation": f"({avg_x2:.3f}, {avg_y2:.3f}, {avg_z2:.3f})",
-        "Δ Avg. Per Axis Deviation": f"dx={avg_dx:.3f}, dy={avg_dy:.3f}, dz={avg_dz:.3f}"
-    }
-
-    csv_path = os.path.join(folder, "wire_analysis_results.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=results[0].keys())
+    with open(txt_output, "w") as txt_file, open(csv_output, "w", newline='') as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=["file", "length_mm", "tilt_value_deg", "tilt_direction", "3D_deviation_mm"])
         writer.writeheader()
-        writer.writerows(results)
 
-    summary_path = os.path.join(folder, "average_summary.txt")
-    with open(summary_path, "w", encoding="utf-8") as f:
-        for title, value in averages.items():
-            f.write(f"{title}: {value}\n")
+        # Single image or batch folder
+        if os.path.isdir(IMAGE_PATH):
+            image_files = [os.path.join(IMAGE_PATH, f) for f in os.listdir(IMAGE_PATH) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        else:
+            image_files = [IMAGE_PATH]
 
-    print(f"✅ Analysis complete for {len(results)} images.")
-    print(f"📊 CSV saved: {csv_path}")
-    print(f"📄 Summary saved: {summary_path}")
+        for path in image_files:
+            result = analyze_wire_image(path)
+            if result:
+                results.append(result)
+                writer.writerow(result)
+                txt_file.write(str(result) + "\n")
+
+    print("\n✅ Processing complete.")
+    print(f"📁 Results saved in: {OUTPUT_DIR}")
 
 # ============================================================
-# ENTRY POINT
+# RUN
 # ============================================================
 if __name__ == "__main__":
-    analyze_all()
+    main()
