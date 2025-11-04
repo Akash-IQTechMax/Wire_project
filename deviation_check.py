@@ -253,7 +253,6 @@
 
 
 
-
 import cv2
 import numpy as np
 import os
@@ -269,14 +268,14 @@ UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Calibration (adjusted)
-# Make sure this reflects your calibration: 1 mm = 9.727 px
+# Calibration: 1 mm = 9.727 px
 PIXELS_PER_MM = 9.727
 MM_PER_PIXEL = 1 / PIXELS_PER_MM
 
 # HSV range for copper-like wire color
 COLOR_LOWER = np.array([5, 80, 50])
 COLOR_UPPER = np.array([25, 255, 255])
+
 
 # ============================================================
 # FUNCTION: Analyze a single wire
@@ -290,8 +289,8 @@ def analyze_wire(image_path):
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, COLOR_LOWER, COLOR_UPPER)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         print(f"⚠️ No wire detected in {os.path.basename(image_path)}")
         return None
@@ -300,17 +299,23 @@ def analyze_wire(image_path):
     length_px = cv2.arcLength(contour, False)
     length_mm = length_px * MM_PER_PIXEL
 
+    # Fit a line to determine tilt
     [vx, vy, x, y] = cv2.fitLine(contour, cv2.DIST_L2, 0, 0.01, 0.01)
     angle_deg = math.degrees(math.atan2(vy, vx))
+
+    # Normalize tilt angle to (-90, 90)
     if angle_deg < -90:
         angle_deg += 180
     elif angle_deg > 90:
         angle_deg -= 180
 
+    tilt_direction = "Positive" if angle_deg >= 0 else "Negative"
+
     return {
         "image": os.path.basename(image_path),
         "length_mm": float(length_mm),
-        "angle_deg": float(angle_deg)
+        "angle_deg": float(angle_deg),
+        "tilt_direction": tilt_direction
     }
 
 
@@ -328,14 +333,22 @@ def compute_averages(results):
     avg_angle = np.mean(angles)
     avg_3d_dev = np.std(lengths)
 
-    # “Real Wire” extended summary values
+    pos_tilts = sum(1 for r in results if r["tilt_direction"] == "Positive")
+    neg_tilts = sum(1 for r in results if r["tilt_direction"] == "Negative")
+    tilt_summary = (
+        "Mostly Positive Tilt" if pos_tilts > neg_tilts
+        else "Mostly Negative Tilt" if neg_tilts > pos_tilts
+        else "Balanced Tilt"
+    )
+
+    # Real wire (for Unity reference)
     avg_real_length = avg_length * 1.39
     avg_real_angle = 92.33
     orientation = "Vertical" if abs(avg_angle) > 45 else "Horizontal"
 
     summary = {
         "Average Bent Wire Length": f"{avg_length:.3f} mm",
-        "Average Tilt Angle": f"{avg_angle:.2f}°",
+        "Average Tilt Angle": f"{avg_angle:.2f}° ({tilt_summary})",
         "Average 3D Deviation": f"{avg_3d_dev:.3f} mm",
         "---": "----------------------------------------",
         "Avg. Real Wire Length": f"{avg_real_length:.3f} mm",
@@ -353,7 +366,7 @@ def compute_averages(results):
 
 
 # ============================================================
-# FUNCTION: Analyze All Uploads
+# FUNCTION: Analyze all uploads
 # ============================================================
 def analyze_all():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -376,7 +389,7 @@ def analyze_all():
 
     summary = compute_averages(results)
 
-    # Write text summary
+    # Write summary text
     summary_path = os.path.join(result_dir, "average_summary.txt")
     with open(summary_path, "w") as f:
         for k, v in summary.items():
@@ -390,9 +403,10 @@ def analyze_all():
         for k, v in summary.items():
             writer.writerow([k, v])
 
-    print("\n✅ Average Summary:")
+    # Log output
+    print("\n✅ Final Summary:")
     for k, v in summary.items():
         print(f"{k}: {v}")
+    print(f"\n📂 Results saved in: {result_dir}")
 
-    print(f"\n📁 Results saved in: {result_dir}")
     return summary_path
