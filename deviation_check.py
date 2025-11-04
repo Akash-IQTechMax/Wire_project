@@ -283,7 +283,6 @@ UNITY_ANGLES = {
     "Z": 89.8
 }
 
-
 # ============================================================
 # CALIBRATION
 # ============================================================
@@ -301,7 +300,6 @@ def calibrate_reference():
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         print("⚠️ No contour found in reference image — using adaptive color range.")
-        # Adaptive fallback
         h, s, v = cv2.split(hsv)
         lower = np.array([np.percentile(h, 5), np.percentile(s, 5), np.percentile(v, 5)], dtype=np.uint8)
         upper = np.array([np.percentile(h, 95), np.percentile(s, 95), np.percentile(v, 95)], dtype=np.uint8)
@@ -317,7 +315,6 @@ def calibrate_reference():
     print(f"✅ Calibrated: 1 mm = {PIXELS_PER_MM:.3f} px  |  1 px = {1/PIXELS_PER_MM:.6f} mm")
     return True
 
-
 # ============================================================
 # ANALYZE SINGLE IMAGE
 # ============================================================
@@ -331,7 +328,7 @@ def analyze_wire_image(path):
     mask = cv2.inRange(hsv, COLOR_LOWER, COLOR_UPPER)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # 🔧 Adaptive color fallback if no contours found
+    # Adaptive color fallback if no contours found
     if not contours:
         h, s, v = cv2.split(hsv)
         lower = np.array([np.percentile(h, 5), np.percentile(s, 5), np.percentile(v, 5)], dtype=np.uint8)
@@ -345,27 +342,30 @@ def analyze_wire_image(path):
 
     cnt = max(contours, key=cv2.contourArea)
 
-    # Fit a straight line for more stable angle detection
+    # ============================================================
+    # ✅ Signed angle + real arc length for bent wire
+    # ============================================================
     [vx, vy, x0, y0] = cv2.fitLine(cnt, cv2.DIST_L2, 0, 0.01, 0.01)
     vx, vy = float(vx), float(vy)
     angle_rad = math.atan2(vy, vx)
     angle_deg = math.degrees(angle_rad)
-    if angle_deg < 0:
-        angle_deg += 180
+    if angle_deg > 180:
+        angle_deg -= 360  # Normalize to [-180, 180]
 
-    # Bounding box for length estimation
-    x, y, w, h = cv2.boundingRect(cnt)
-    wire_length_px = max(w, h)
+    # Actual contour length (handles bends)
+    wire_length_px = cv2.arcLength(cnt, closed=False)
     wire_length_mm = wire_length_px / PIXELS_PER_MM
     deviation_len = abs(wire_length_mm - REFERENCE_LENGTH_MM)
 
-    # Orientation / direction
-    if 85 <= angle_deg <= 95:
-        orientation = "Vertical"
-    elif angle_deg < 85:
-        orientation = f"Tilted Right ({angle_deg:.1f}°)"
+    # Orientation (signed)
+    if -5 <= angle_deg <= 5:
+        orientation = "Horizontal"
+    elif angle_deg > 5:
+        orientation = f"Tilted Up (+{angle_deg:.1f}°)"
+    elif angle_deg < -5:
+        orientation = f"Tilted Down ({angle_deg:.1f}°)"
     else:
-        orientation = f"Tilted Left ({180 - angle_deg:.1f}°)"
+        orientation = "Unknown"
 
     # ------------------------------------------------------------
     # 3D vector calculation
@@ -377,22 +377,17 @@ def analyze_wire_image(path):
     z2 = overlay_len * math.cos(a3)
 
     # Real wire vector
-    beta1 = angle_deg
-    b1 = math.radians(beta1)
+    b1 = math.radians(angle_deg)
     x1 = wire_length_mm * math.cos(b1)
     y1 = wire_length_mm * math.sin(b1)
     z1 = 0
 
-    # Axis deviations
     dx = x2 - x1
     dy = y2 - y1
     dz = z2 - z1
 
-    # 3D deviation distance
     deviation_3d = math.sqrt(dx**2 + dy**2 + dz**2)
-
-    # Angular deviation
-    angle_dev = abs(beta1 - UNITY_ANGLES["X"])
+    angle_dev = abs(angle_deg - UNITY_ANGLES["X"])
 
     # ------------------------------------------------------------
     # Annotate image
@@ -429,9 +424,8 @@ def analyze_wire_image(path):
     print(f"[INFO] {os.path.basename(path)} | Angle: {angle_deg:.2f}° | 3D Dev: {deviation_3d:.3f} mm")
     return result
 
-
 # ============================================================
-# ANALYZE 6 IMAGES AND AVERAGE
+# ANALYZE MULTIPLE IMAGES AND AVERAGE
 # ============================================================
 def analyze_all():
     if not calibrate_reference():
@@ -466,11 +460,9 @@ def analyze_all():
     avg_3d_dev = np.mean([r["3D_deviation_mm"] for r in results])
     avg_angle_dev = np.mean([r["angle_deviation_deg"] for r in results])
 
-    # Orientation majority
     orientations = [r["orientation"].split()[0] for r in results]
     avg_orientation = max(set(orientations), key=orientations.count)
 
-    # Real and overlay endpoints (averaged)
     avg_x1 = np.mean([r["wire_tip_real"]["x1"] for r in results])
     avg_y1 = np.mean([r["wire_tip_real"]["y1"] for r in results])
     avg_z1 = np.mean([r["wire_tip_real"]["z1"] for r in results])
@@ -483,7 +475,6 @@ def analyze_all():
     avg_dy = np.mean([r["delta"]["dy"] for r in results])
     avg_dz = np.mean([r["delta"]["dz"] for r in results])
 
-    # ---- Ordered output ----
     averages = {
         "Avg. Real Wire Length": f"{avg_length:.3f} mm",
         "β Avg. Real Wire Tilt Angle (From X-axis)": f"{avg_angle:.2f}°",
@@ -496,7 +487,6 @@ def analyze_all():
         "Δ Avg. Per Axis Deviation": f"dx={avg_dx:.3f}, dy={avg_dy:.3f}, dz={avg_dz:.3f}"
     }
 
-    # ---- Save all data ----
     csv_path = os.path.join(folder, "wire_analysis_results.csv")
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=results[0].keys())
@@ -511,7 +501,6 @@ def analyze_all():
     print(f"✅ Analysis complete for {len(results)} images.")
     print(f"📊 CSV saved: {csv_path}")
     print(f"📄 Summary saved: {summary_path}")
-
 
 # ============================================================
 # ENTRY POINT
