@@ -117,6 +117,32 @@ def serve_results(filename):
 def serve_uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
+@app.route('/list_uploads', methods=['GET'])
+def list_uploaded_images():
+    """Return a JSON list of all image filenames in the uploads folder."""
+    try:
+        # Get all files from the UPLOAD_FOLDER
+        files = [
+            f for f in os.listdir(UPLOAD_FOLDER)
+            if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))
+        ]
+
+        # Optionally filter only image files (jpg, png, jpeg, bmp, etc.)
+        image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
+        image_files = [f for f in files if f.lower().endswith(image_extensions)]
+
+        return jsonify({
+            "status": "success",
+            "count": len(image_files),
+            "images": image_files
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
 
 # --------------------------------------------
 # RUN SERVER
