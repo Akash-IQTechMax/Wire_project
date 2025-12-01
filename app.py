@@ -153,75 +153,132 @@
 
 
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
+from werkzeug.utils import secure_filename
 import os
-from deviation_check import analyze_all_images_new  # <-- Your new analysis function
+import time
+from datetime import datetime
+import json
+from deviation_check import analyze_frame, IMAGE_EXTS, UPLOAD_FOLDER, RESULTS_DIR
 
-UPLOAD_FOLDER = "uploads"
-RESULTS_FOLDER = "results"
+# --------------------------------------------
+# CONFIG
+# --------------------------------------------
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 app = Flask(__name__)
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["RESULTS_FOLDER"] = RESULTS_FOLDER
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(RESULTS_FOLDER, exist_ok=True)
+# --------------------------------------------
+# SERVER STATUS
+# --------------------------------------------
+@app.route('/getStatus')
+def get_status():
+    return 'Server is running!'
 
-# ---------------------------------------------------------
-# API: Upload images (Unity or browser)
-# ---------------------------------------------------------
-@app.route("/upload", methods=["POST"])
+# --------------------------------------------
+# FILE UPLOAD
+# --------------------------------------------
+@app.route('/upload', methods=['POST'])
 def upload_image():
-    if "file" not in request.files:
-        return jsonify({"status": "error", "message": "No file part"}), 400
+    """Accept image uploads from Unity or other clients."""
+    if 'file' not in request.files:
+        return jsonify({"status": "error", "message": "No file uploaded"}), 400
 
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"status": "error", "message": "Empty filename"}), 400
-
-    save_path = os.path.join(app.config["UPLOAD_FOLDER"], file.filename)
+    file = request.files['file']
+    filename = secure_filename(file.filename)
+    save_path = os.path.join(UPLOAD_FOLDER, filename)
     file.save(save_path)
 
-    return jsonify({
-        "status": "success",
-        "saved_as": file.filename
-    })
+    print(f"✅ Uploaded: {filename}")
+    return jsonify({"status": "success", "filename": filename}), 200
 
-# ---------------------------------------------------------
-# API: Run Full Analysis on ALL images in uploads/
-# ---------------------------------------------------------
-@app.route("/analyze", methods=["GET"])
-def analyze():
+# --------------------------------------------
+# LIST UPLOADED IMAGES
+# --------------------------------------------
+@app.route('/list_uploads', methods=['GET'])
+def list_uploaded_images():
     try:
-        result = analyze_all_images_new()
-        return jsonify(result)
-    except Exception as e:
+        files = [
+            f for f in os.listdir(UPLOAD_FOLDER)
+            if f.lower().endswith(IMAGE_EXTS)
+        ]
         return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+            "status": "success",
+            "count": len(files),
+            "images": files
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-# ---------------------------------------------------------
-# API: Fetch processed result images
-# ---------------------------------------------------------
-@app.route("/results/<path:filename>", methods=["GET"])
-def get_result(filename):
-    return send_from_directory(app.config["RESULTS_FOLDER"], filename)
+# --------------------------------------------
+# ANALYZE UPLOADED IMAGES
+# --------------------------------------------
+@app.route('/analyze', methods=['GET'])
+def analyze_all_images():
+    """Run deviation analysis for all uploaded images."""
+    start_time = time.time()
+    print("\n🚀 Starting wire deviation analysis...")
+    print(f"🕒 Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# ---------------------------------------------------------
-# API: Fetch uploaded images (optional)
-# ---------------------------------------------------------
-@app.route("/uploads/<path:filename>", methods=["GET"])
-def get_upload(filename):
-    return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
+    image_files = [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith(IMAGE_EXTS)]
+    if not image_files:
+        return jsonify({"status": "error", "message": "No images found"}), 404
 
-# ---------------------------------------------------------
-# Root test
-# ---------------------------------------------------------
-@app.route("/", methods=["GET"])
-def home():
-    return "Wire Deviation Analyzer API is running."
+    pixels_per_mm = None
+    summary = {}
 
-# ---------------------------------------------------------
+    for filename in image_files:
+        img_path = os.path.join(UPLOAD_FOLDER, filename)
+        import cv2
+        frame = cv2.imread(img_path)
+        if frame is None:
+            print(f"❌ Could not read image: {filename}")
+            continue
+
+        try:
+            out, used_pix_per_mm, measurement = analyze_frame(frame, pixels_per_mm)
+            if used_pix_per_mm:
+                pixels_per_mm = used_pix_per_mm
+
+            # Save annotated result
+            base_name, ext = os.path.splitext(filename)
+            result_path = os.path.join(RESULTS_DIR, f"{base_name}_result{ext}")
+            cv2.imwrite(result_path, out)
+
+            summary[filename] = measurement
+
+        except Exception as e:
+            print(f"❌ Error analyzing {filename}: {e}")
+            summary[filename] = {"error": str(e)}
+
+    elapsed_time = time.time() - start_time
+    print(f"✅ Analysis completed in {elapsed_time:.2f} seconds.")
+
+    response_data = {
+        "status": "success",
+        "processing_time_sec": round(elapsed_time, 2),
+        "results": summary
+    }
+
+    return Response(
+        json.dumps(response_data, ensure_ascii=False, indent=4),
+        mimetype="application/json"
+    ), 200
+
+# --------------------------------------------
+# SERVE RESULTS / UPLOADS
+# --------------------------------------------
+@app.route('/results/<path:filename>')
+def serve_results(filename):
+    return send_from_directory(RESULTS_DIR, filename)
+
+@app.route('/uploads/<path:filename>')
+def serve_uploads(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
+# --------------------------------------------
+# RUN SERVER
+# --------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=8080, debug=True)
