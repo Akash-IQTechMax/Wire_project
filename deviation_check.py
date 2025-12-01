@@ -452,7 +452,7 @@ from skimage.morphology import skeletonize
 # -----------------------------
 # CONFIG
 # -----------------------------
-MODEL_PATH = r"C:\yolo_copper\runs\detect\copper_wire\weights\best.pt"
+MODEL_PATH = r"./yolov8n-seg.pt"
 UPLOAD_FOLDER = "uploads"
 RESULTS_DIR = "results"
 
