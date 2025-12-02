@@ -454,10 +454,9 @@ from datetime import datetime
 # -----------------------------
 # CONFIG
 # -----------------------------
-# NOTE: Update MODEL_PATH to your actual YOLO model location
-# IMPORTANT: For Render deployment, change this to a relative path 
-# if your model is deployed with your code, e.g., MODEL_PATH = "models/best.pt"
-MODEL_PATH = "models/best.pt"
+# NOTE: Updated to relative path for segmentation model for server deployment
+MODEL_PATH = "models/yolov8n-seg.pt" 
+
 # Directories are typically managed by app.py, but kept here for fallback/clarity
 UPLOAD_FOLDER = "uploads"
 RESULTS_DIR = "results"
@@ -680,7 +679,7 @@ def get_largest_bbox_from_res(res):
     idx = int(np.argmax(areas))
     x1,y1,x2,y2 = xyxy[idx].astype(int).tolist()
     
-    return x1,y1,x2,y2
+    return x1,y1,x2,y2, idx # Return index for mask extraction
 
 # -----------------------------
 # Segment Tilt Analysis
@@ -759,26 +758,56 @@ def analyze_frame(frame, last_pixels_per_mm=FALLBACK_PIXELS_PER_MM):
     if len(results) == 0:
         return frame_with_aruco, pixels_per_mm, None
     res = results[0]
-    bbox = get_largest_bbox_from_res(res)
-    if bbox is None:
+    
+    # Get largest bbox and its index
+    bbox_result = get_largest_bbox_from_res(res)
+    if bbox_result is None:
         return frame_with_aruco, pixels_per_mm, None
 
-    x1,y1,x2,y2 = bbox
+    x1,y1,x2,y2, idx = bbox_result # Unpack the returned index
     x1 = clamp(x1, 0, frame.shape[1]-1); x2 = clamp(x2, 0, frame.shape[1]-1)
     y1 = clamp(y1, 0, frame.shape[0]-1); y2 = clamp(y2, 0, frame.shape[0]-1)
     roi = frame[y1:y2, x1:x2].copy()
     if roi.size == 0:
         return frame_with_aruco, pixels_per_mm, None
 
-    # Image Processing (Grayscale, Thresholding, Skeletonization)
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    gray_eq = cv2.equalizeHist(gray)
-    gray_blur = cv2.GaussianBlur(gray_eq, (5,5), 0)
-    _, thr = cv2.threshold(gray_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # ----------------------------------------------------
+    # CORE CHANGE: Image Processing (Use Segmentation Mask)
+    # ----------------------------------------------------
+    mask_bool = None
     
-    mask_bool = (thr > 0)
-    if np.count_nonzero(mask_bool) < 10:
-        mask_bool = (~mask_bool) # Invert mask if object is dark on light background
+    # 1. Try to use the segmentation mask if available (more robust)
+    if res.masks is not None and res.masks.xyxy.numel() > 0:
+        try:
+            # Get the mask corresponding to the largest detected object (idx)
+            # The mask data is often normalized/resized, so we resize to the full frame size
+            h_orig, w_orig = frame.shape[:2]
+            
+            # The mask is often provided relative to the original image size
+            mask_data = res.masks.data[idx].cpu().numpy()
+            mask_resized = cv2.resize(mask_data, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
+            
+            # Crop the mask to the bounding box (ROI) area
+            mask_roi = mask_resized[y1:y2, x1:x2]
+            
+            mask_bool = (mask_roi > 0.5) # Threshold mask to binary (True/False)
+        except Exception as mask_e:
+            print(f"Warning: Failed to process segmentation mask. Falling back to thresholding. Error: {mask_e}")
+            pass # Fall through to thresholding logic
+
+    # 2. Fallback to traditional thresholding if mask processing failed or wasn't available
+    if mask_bool is None or np.count_nonzero(mask_bool) == 0:
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        gray_eq = cv2.equalizeHist(gray)
+        gray_blur = cv2.GaussianBlur(gray_eq, (5,5), 0)
+        _, thr = cv2.threshold(gray_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        mask_bool = (thr > 0)
+        # Handle cases where the wire might be darker than the background
+        if np.count_nonzero(mask_bool) < 10:
+            mask_bool = (~mask_bool) 
+
+    # ----------------------------------------------------
     
     mask_bool = mask_bool.astype(bool)
     try:
@@ -973,8 +1002,3 @@ def analyze_single_image(img_path: str, output_dir: str, filename: str):
         print(f"❌ {error_message}")
         print(traceback.format_exc()) # Print stack trace for debugging
         return {"status": "error", "message": error_message}
-
-
-# -----------------------------
-# Removed the old 'main' execution block
-# -----------------------------
