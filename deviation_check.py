@@ -457,8 +457,7 @@ from datetime import datetime
 # NOTE: Update MODEL_PATH to your actual YOLO model location
 # IMPORTANT: For Render deployment, change this to a relative path 
 # if your model is deployed with your code, e.g., MODEL_PATH = "models/best.pt"
-MODEL_PATH = r"C:\yolo_copper\runs\detect\copper_wire\weights\best.pt" 
-
+MODEL_PATH = "models/best.pt"
 # Directories are typically managed by app.py, but kept here for fallback/clarity
 UPLOAD_FOLDER = "uploads"
 RESULTS_DIR = "results"
