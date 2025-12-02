@@ -153,7 +153,6 @@
 
 
 
-
 from flask import Flask, request, jsonify, send_from_directory, Response
 from werkzeug.utils import secure_filename
 import os
@@ -165,6 +164,7 @@ from deviation_check import analyze_all
 # --------------------------------------------
 # CONFIG
 # --------------------------------------------
+# Render looks for a file/directory structure exactly like this.
 UPLOAD_FOLDER = "uploads"
 RESULTS_DIR = "results"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -172,9 +172,19 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 app = Flask(__name__)
 
+# --- FIX: New Root Route for Health Check and Home Page ---
+@app.route('/', methods=['GET'])
+def home_status():
+    """Provides a clear status for Render health checks and home access."""
+    return jsonify({"status": "Server is running and ready for processing", 
+                    "endpoints": ["/upload (POST)", "/analyze (GET)"]}), 200
+
+# --------------------------------------------
+# STATUS ENDPOINT (Kept for compatibility)
+# --------------------------------------------
 @app.route('/getStatus')
-def hello_world():
-    return 'Server is running!'
+def get_status():
+    return jsonify({"status": "Server is running!"}), 200
 
 # --------------------------------------------
 # FILE UPLOAD ENDPOINT (No change)
@@ -186,64 +196,56 @@ def upload_image():
         return jsonify({"status": "error", "message": "No file uploaded"}), 400
 
     file = request.files['file']
+    # If the client sends an empty filename field
+    if file.filename == '':
+        return jsonify({"status": "error", "message": "No selected file"}), 400
+        
     filename = secure_filename(file.filename)
     save_path = os.path.join(UPLOAD_FOLDER, filename)
     file.save(save_path)
 
     print(f"✅ Uploaded: {filename}")
-    return jsonify({"status": "success", "filename": filename}), 200
+    return jsonify({"status": "success", "filename": filename, "path": f"/uploads/{filename}"}), 200
 
 
 # --------------------------------------------
-# ANALYSIS ENDPOINT (UPDATED to include average)
+# ANALYSIS ENDPOINT (No functional change, minor cleanup)
 # --------------------------------------------
 @app.route('/analyze', methods=['GET'])
 def analyze_all_images():
     """Run the wire deviation analysis on all uploaded images."""
     start_time = time.time()
     print("\n🚀 Starting batch wire deviation analysis...")
-    print(f"🕒 Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     try:
-        # 1. Trigger analysis 
         latest_folder_name = analyze_all()
 
         if not latest_folder_name:
-            print("⚠️ No images to analyze or analysis failed to produce a folder.")
+            # Return a success code (200) with a warning status
             return jsonify({"status": "warning", "message": "No images available for analysis"}), 200
 
         latest_folder_path = os.path.join(RESULTS_DIR, latest_folder_name)
         
-        # 2. Define result file paths
-        individual_summary_path = os.path.join(latest_folder_path, "individual_summary.json")
-        average_summary_path = os.path.join(latest_folder_path, "session_average.json")
-        csv_path = os.path.join(latest_folder_path, "wire_analysis_results.csv")
-            
-        # 3. Load the results
-        with open(individual_summary_path, 'r') as f:
+        # Load the results
+        with open(os.path.join(latest_folder_path, "individual_summary.json"), 'r') as f:
             individual_results = json.load(f)
 
         session_average = {}
+        average_summary_path = os.path.join(latest_folder_path, "session_average.json")
         if os.path.exists(average_summary_path):
              with open(average_summary_path, 'r') as f:
-                session_average = json.load(f)
+                 session_average = json.load(f)
         
         elapsed_time = time.time() - start_time
         print(f"✅ Analysis completed successfully in {elapsed_time:.2f} seconds.")
         
-        # 4. Construct the final response
+        # Construct the final response
         response_data = {
             "status": "success",
             "processing_time_sec": round(elapsed_time, 2),
             "results_folder": f"/results/{latest_folder_name}",
-            
-            # New field for the average
             "session_average": session_average, 
-            
-            # Individual results
             "individual_results": individual_results, 
-            
-            # Links to the saved files
             "individual_summary_file": f"/results/{latest_folder_name}/individual_summary.json",
             "average_summary_file": f"/results/{latest_folder_name}/session_average.json",
             "csv_file": f"/results/{latest_folder_name}/wire_analysis_results.csv"
@@ -279,13 +281,8 @@ def serve_uploads(filename):
 def list_uploaded_images():
     """Return a JSON list of all image filenames in the uploads folder."""
     try:
-        files = [
-            f for f in os.listdir(UPLOAD_FOLDER)
-            if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))
-        ]
-
         image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
-        image_files = [f for f in files if f.lower().endswith(image_extensions)]
+        image_files = [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith(image_extensions)]
 
         return jsonify({
             "status": "success",
@@ -301,7 +298,9 @@ def list_uploaded_images():
 
 
 # --------------------------------------------
-# RUN SERVER
+# RUN SERVER (For Local Testing Only)
 # --------------------------------------------
 if __name__ == "__main__":
+    # Note: Render uses Gunicorn, which handles the binding. 
+    # This is for local development only.
     app.run(host="0.0.0.0", port=8080, debug=True)
