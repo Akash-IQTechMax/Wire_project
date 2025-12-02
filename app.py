@@ -267,14 +267,8 @@ def serve_results(folder_name, filename):
 def serve_uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
-# The other endpoints (`/analyze`, `/list_uploads`, `parse_summary_text_to_json`) 
-# are removed as they are not needed for the single-file analysis flow.
-# You can keep them if you need batch processing, but the primary flow is the new one.
-
 # --------------------------------------------
 # RUN SERVER
 # --------------------------------------------
 if __name__ == "__main__":
-    # In a production environment like Render, you might not use debug=True
-    # and instead use a WSGI server like Gunicorn.
     app.run(host="0.0.0.0", port=8080, debug=True)
