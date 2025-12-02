@@ -453,7 +453,7 @@ import shutil
 # CONFIG
 # -----------------------------
 # NOTE: Update MODEL_PATH to your actual YOLO model location
-MODEL_PATH = r"C:\Wire_project\yolov8n-seg.pt"
+MODEL_PATH = 'yolov8n-seg.pt'
 UPLOAD_FOLDER = "uploads"
 RESULTS_DIR = "results"
 
