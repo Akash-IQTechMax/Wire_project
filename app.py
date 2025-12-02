@@ -153,35 +153,35 @@
 
 
 
+
 from flask import Flask, request, jsonify, send_from_directory, Response
 from werkzeug.utils import secure_filename
 import os
 import time
 from datetime import datetime
 import json
-from deviation_check import analyze_frame, IMAGE_EXTS, UPLOAD_FOLDER, RESULTS_DIR
+from deviation_check import analyze_all 
 
 # --------------------------------------------
 # CONFIG
 # --------------------------------------------
+UPLOAD_FOLDER = "uploads"
+RESULTS_DIR = "results"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 app = Flask(__name__)
 
-# --------------------------------------------
-# SERVER STATUS
-# --------------------------------------------
 @app.route('/getStatus')
-def get_status():
+def hello_world():
     return 'Server is running!'
 
 # --------------------------------------------
-# FILE UPLOAD
+# FILE UPLOAD ENDPOINT (No change)
 # --------------------------------------------
 @app.route('/upload', methods=['POST'])
 def upload_image():
-    """Accept image uploads from Unity or other clients."""
+    """Accept image uploads from iPad/Unity."""
     if 'file' not in request.files:
         return jsonify({"status": "error", "message": "No file uploaded"}), 400
 
@@ -193,81 +193,79 @@ def upload_image():
     print(f"✅ Uploaded: {filename}")
     return jsonify({"status": "success", "filename": filename}), 200
 
-# --------------------------------------------
-# LIST UPLOADED IMAGES
-# --------------------------------------------
-@app.route('/list_uploads', methods=['GET'])
-def list_uploaded_images():
-    try:
-        files = [
-            f for f in os.listdir(UPLOAD_FOLDER)
-            if f.lower().endswith(IMAGE_EXTS)
-        ]
-        return jsonify({
-            "status": "success",
-            "count": len(files),
-            "images": files
-        }), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --------------------------------------------
-# ANALYZE UPLOADED IMAGES
+# ANALYSIS ENDPOINT (UPDATED to include average)
 # --------------------------------------------
 @app.route('/analyze', methods=['GET'])
 def analyze_all_images():
-    """Run deviation analysis for all uploaded images."""
+    """Run the wire deviation analysis on all uploaded images."""
     start_time = time.time()
-    print("\n🚀 Starting wire deviation analysis...")
+    print("\n🚀 Starting batch wire deviation analysis...")
     print(f"🕒 Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    image_files = [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith(IMAGE_EXTS)]
-    if not image_files:
-        return jsonify({"status": "error", "message": "No images found"}), 404
+    try:
+        # 1. Trigger analysis 
+        latest_folder_name = analyze_all()
 
-    pixels_per_mm = None
-    summary = {}
+        if not latest_folder_name:
+            print("⚠️ No images to analyze or analysis failed to produce a folder.")
+            return jsonify({"status": "warning", "message": "No images available for analysis"}), 200
 
-    for filename in image_files:
-        img_path = os.path.join(UPLOAD_FOLDER, filename)
-        import cv2
-        frame = cv2.imread(img_path)
-        if frame is None:
-            print(f"❌ Could not read image: {filename}")
-            continue
+        latest_folder_path = os.path.join(RESULTS_DIR, latest_folder_name)
+        
+        # 2. Define result file paths
+        individual_summary_path = os.path.join(latest_folder_path, "individual_summary.json")
+        average_summary_path = os.path.join(latest_folder_path, "session_average.json")
+        csv_path = os.path.join(latest_folder_path, "wire_analysis_results.csv")
+            
+        # 3. Load the results
+        with open(individual_summary_path, 'r') as f:
+            individual_results = json.load(f)
 
-        try:
-            out, used_pix_per_mm, measurement = analyze_frame(frame, pixels_per_mm)
-            if used_pix_per_mm:
-                pixels_per_mm = used_pix_per_mm
+        session_average = {}
+        if os.path.exists(average_summary_path):
+             with open(average_summary_path, 'r') as f:
+                session_average = json.load(f)
+        
+        elapsed_time = time.time() - start_time
+        print(f"✅ Analysis completed successfully in {elapsed_time:.2f} seconds.")
+        
+        # 4. Construct the final response
+        response_data = {
+            "status": "success",
+            "processing_time_sec": round(elapsed_time, 2),
+            "results_folder": f"/results/{latest_folder_name}",
+            
+            # New field for the average
+            "session_average": session_average, 
+            
+            # Individual results
+            "individual_results": individual_results, 
+            
+            # Links to the saved files
+            "individual_summary_file": f"/results/{latest_folder_name}/individual_summary.json",
+            "average_summary_file": f"/results/{latest_folder_name}/session_average.json",
+            "csv_file": f"/results/{latest_folder_name}/wire_analysis_results.csv"
+        }
+        
+        return Response(
+            json.dumps(response_data, ensure_ascii=False, indent=4),
+            mimetype="application/json"
+        ), 200
 
-            # Save annotated result
-            base_name, ext = os.path.splitext(filename)
-            result_path = os.path.join(RESULTS_DIR, f"{base_name}_result{ext}")
-            cv2.imwrite(result_path, out)
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        print(f"❌ Error during analysis after {elapsed_time:.2f} seconds: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Analysis failed: {str(e)}",
+            "processing_time_sec": round(elapsed_time, 2)
+        }), 500
 
-            summary[filename] = measurement
-
-        except Exception as e:
-            print(f"❌ Error analyzing {filename}: {e}")
-            summary[filename] = {"error": str(e)}
-
-    elapsed_time = time.time() - start_time
-    print(f"✅ Analysis completed in {elapsed_time:.2f} seconds.")
-
-    response_data = {
-        "status": "success",
-        "processing_time_sec": round(elapsed_time, 2),
-        "results": summary
-    }
-
-    return Response(
-        json.dumps(response_data, ensure_ascii=False, indent=4),
-        mimetype="application/json"
-    ), 200
 
 # --------------------------------------------
-# SERVE RESULTS / UPLOADS
+# STATIC FILE ROUTES (No change)
 # --------------------------------------------
 @app.route('/results/<path:filename>')
 def serve_results(filename):
@@ -276,6 +274,31 @@ def serve_results(filename):
 @app.route('/uploads/<path:filename>')
 def serve_uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
+
+@app.route('/list_uploads', methods=['GET'])
+def list_uploaded_images():
+    """Return a JSON list of all image filenames in the uploads folder."""
+    try:
+        files = [
+            f for f in os.listdir(UPLOAD_FOLDER)
+            if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))
+        ]
+
+        image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
+        image_files = [f for f in files if f.lower().endswith(image_extensions)]
+
+        return jsonify({
+            "status": "success",
+            "count": len(image_files),
+            "images": image_files
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
 
 # --------------------------------------------
 # RUN SERVER
