@@ -438,26 +438,32 @@
 
 
 
+# deviation_check.py
+# Enhanced image-based wire detector with ArUco calibration, skeleton markings, 
+# segment tilt detection, and corrected direction, focusing on single uploaded images.
+
 import cv2
 import numpy as np
 import math
 import os
-import json
-import pandas as pd # Used for calculating the batch average
+import traceback # Added for better error reporting
 from ultralytics import YOLO
 from skimage.morphology import skeletonize
 from datetime import datetime
-import shutil
 
 # -----------------------------
 # CONFIG
 # -----------------------------
 # NOTE: Update MODEL_PATH to your actual YOLO model location
-MODEL_PATH = 'yolov8n-seg.pt'
+# IMPORTANT: For Render deployment, change this to a relative path 
+# if your model is deployed with your code, e.g., MODEL_PATH = "models/best.pt"
+MODEL_PATH = r"C:\yolo_copper\runs\detect\copper_wire\weights\best.pt" 
+
+# Directories are typically managed by app.py, but kept here for fallback/clarity
 UPLOAD_FOLDER = "uploads"
 RESULTS_DIR = "results"
 
-# Ensure directories exist
+# Ensure directories exist (only needed if running deviation_check.py directly)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -465,84 +471,104 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 FALLBACK_PIXELS_PER_MM = 9.727
 MM_TO_CM = 0.1
 
-# ArUco settings
+# ArUco settings (Using your confirmed 4x4_1000 dictionary and 3.5 cm = 35.0 mm size)
 ARUCO_SIDE_MM = 35.0
 ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_1000)
 ARUCO_PARAMS = cv2.aruco.DetectorParameters()
 ARUCO_DETECTOR = cv2.aruco.ArucoDetector(ARUCO_DICT, ARUCO_PARAMS)
 
-# Supported image extensions
+# Supported image extensions (not strictly needed here but good to keep)
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
 # -----------------------------
-# Load YOLO
+# Load YOLO Model
 # -----------------------------
 print(f"Loading YOLO model from: {MODEL_PATH}")
 try:
+    # Attempt to load the model
     model = YOLO(MODEL_PATH)
-    print("YOLO loaded.")
+    print("YOLO model loaded successfully.")
 except Exception as e:
     print(f"Error loading YOLO model: {e}. Check MODEL_PATH.")
+    # Use a dummy class to prevent errors if model loading fails
     class DummyYOLO:
-        def __call__(self, *args, **kwargs): return []
+        def __call__(self, *args, **kwargs):
+            return []
     model = DummyYOLO()
 
 
 # -----------------------------
-# Utilities (clamp, normalize_angle, skeleton helpers, ArUco, bbox, tilt)
-# Note: Full body of helper functions are omitted here for brevity, 
-#       but should be included exactly as in your previous submission.
+# Utilities
 # -----------------------------
-
 def clamp(v, a, b):
     return max(a, min(b, v))
 
 def normalize_angle(angle):
-    while angle > 180: angle -= 360
-    while angle <= -180: angle += 360
-    if angle > 90: angle -= 180
-    if angle < -90: angle += 180
+    # Constrains angle to the range (-90, 90]
+    while angle > 180:
+        angle -= 360
+    while angle <= -180:
+        angle += 360
+    if angle > 90:
+        angle -= 180
+    if angle < -90:
+        angle += 180
     return angle
 
+# -----------------------------
+# Skeleton helpers
+# -----------------------------
 def find_skeleton_endpoints(skel):
     endpoints = []
     h, w = skel.shape
     for r in range(h):
         for c in range(w):
-            if not skel[r, c]: continue
+            if not skel[r, c]:
+                continue
             r0 = max(0, r-1); r1 = min(h-1, r+1)
             c0 = max(0, c-1); c1 = min(w-1, c+1)
             neigh = skel[r0:r1+1, c0:c1+1]
             cnt = np.count_nonzero(neigh) - 1
-            if cnt == 1: endpoints.append((r, c))
+            if cnt == 1:
+                endpoints.append((r, c))
     return endpoints
 
 def trace_skeleton_path(skel):
     sk = (skel > 0).astype(np.uint8)
     num_labels, labels = cv2.connectedComponents(sk)
-    if num_labels <= 1: return [], 0.0
+    if num_labels <= 1:
+        return [], 0.0
     
-    best_label = 1; best_count = 0
+    # Find the largest connected component (the main wire)
+    best_label = 1
+    best_count = 0
     for lab in range(1, num_labels):
         cnt = int(np.count_nonzero(labels == lab))
-        if cnt > best_count: best_count = cnt; best_label = lab
+        if cnt > best_count:
+            best_count = cnt
+            best_label = lab
     comp = (labels == best_label).astype(np.uint8)
     
     coords_arr = np.column_stack(np.where(comp))
     coords = set((int(r), int(c)) for r, c in coords_arr)
-    if not coords: return [], 0.0
+    if not coords:
+        return [], 0.0
     
+    # Find endpoints for starting the trace
     endpoints = []
     for (r, c) in coords:
         cnt = 0
         for dr in (-1,0,1):
             for dc in (-1,0,1):
                 if dr == 0 and dc == 0: continue
-                if (r+dr, c+dc) in coords: cnt += 1
-        if cnt == 1: endpoints.append((r,c))
+                if (r+dr, c+dc) in coords:
+                    cnt += 1
+        if cnt == 1:
+            endpoints.append((r,c))
             
     start = endpoints[0] if endpoints else next(iter(coords))
     
+    # Simple path tracing (Depth-First-Search style on skeleton)
     visited = {start}
     path = [start]
     cur = start
@@ -553,9 +579,11 @@ def trace_skeleton_path(skel):
             for dc in (-1,0,1):
                 if dr == 0 and dc == 0: continue
                 n = (r+dr, c+dc)
-                if n in coords and n not in visited: neighbors.append(n)
+                if n in coords and n not in visited:
+                    neighbors.append(n)
         
         if not neighbors:
+            # Backtrack if dead end
             found = False
             for node in reversed(path):
                 rr, cc = node
@@ -563,12 +591,18 @@ def trace_skeleton_path(skel):
                     for dc in (-1,0,1):
                         if dr == 0 and dc == 0: continue
                         n = (rr+dr, cc+dc)
-                        if n in coords and n not in visited: cur = node; found = True; break
+                        if n in coords and n not in visited:
+                            cur = node
+                            found = True
+                            break
                     if found: break
                 if found: break
-            if not found: break
-            else: continue
+            if not found:
+                break
+            else:
+                continue
                 
+        # Move to the first available neighbor (simplest nearest neighbor)
         nxt = neighbors[0] 
         path.append(nxt)
         visited.add(nxt)
@@ -576,83 +610,122 @@ def trace_skeleton_path(skel):
         
     return path, 0.0 
 
+# -----------------------------
+# ArUco detection & calibration
+# -----------------------------
 def detect_aruco_and_pixels_per_mm(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Apply CLAHE for better ArUco detection contrast
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     gray_enhanced = clahe.apply(gray) 
+    
     corners, ids, rejected = ARUCO_DETECTOR.detectMarkers(gray_enhanced)
     vis = frame.copy()
-    if ids is None or len(corners) == 0: return None, vis
+    
+    if ids is None or len(corners) == 0:
+        return None, vis
         
-    best_idx = 0; best_area = 0.0
+    # Find the largest ArUco marker
+    best_idx = 0
+    best_area = 0.0
     for i, c in enumerate(corners):
         pts = c.reshape(-1,2).astype(np.float32)
         area = cv2.contourArea(pts)
-        if area > best_area: best_area = area; best_idx = i
+        if area > best_area:
+            best_area = area
+            best_idx = i
             
     best_c = corners[best_idx].reshape(4,2)
     cv2.polylines(vis, [best_c.astype(np.int32)], True, (0,255,0), 2)
     
+    # Calculate average side length in pixels
     side_lengths = []
     for k in range(4):
         p1 = best_c[k]; p2 = best_c[(k+1)%4]
         side_lengths.append(math.hypot(p2[0]-p1[0], p2[1]-p1[1]))
     avg_side_px = float(np.mean(side_lengths))
     
-    if avg_side_px <= 0: return None, vis
+    if avg_side_px <= 0:
+        return None, vis
         
+    # Calculate pixels per real-world millimeter
     pixels_per_mm = avg_side_px / ARUCO_SIDE_MM
     
     try:
         id_val = int(ids[best_idx][0]) if ids is not None else -1
         cv2.putText(vis, f"ArUco ID:{id_val}", (int(best_c[0][0]), int(best_c[0][1]-10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
-    except Exception: pass
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+    except Exception:
+        pass
         
     return pixels_per_mm, vis
 
+# -----------------------------
+# YOLO bbox helper
+# -----------------------------
 def get_largest_bbox_from_res(res):
     boxes = getattr(res, "boxes", None)
-    if boxes is None or boxes.xyxy.numel() == 0: return None
+    if boxes is None or boxes.xyxy.numel() == 0:
+        return None
     
-    try: xyxy = boxes.xyxy.cpu().numpy()
-    except Exception: return None
+    try:
+        xyxy = boxes.xyxy.cpu().numpy()
+    except Exception:
+        return None
         
-    if xyxy.size == 0: return None
+    if xyxy.size == 0:
+        return None
         
     areas = (xyxy[:,2] - xyxy[:,0]) * (xyxy[:,3] - xyxy[:,1])
     idx = int(np.argmax(areas))
     x1,y1,x2,y2 = xyxy[idx].astype(int).tolist()
+    
     return x1,y1,x2,y2
 
+# -----------------------------
+# Segment Tilt Analysis
+# -----------------------------
 def calculate_segment_tilt(path, x_offset, y_offset, mm_per_pixel, segment_len_px=70):
+    """
+    Analyzes segments of the wire path to find the segment with the largest tilt.
+    """
     max_tilt_deg = 0.0
     best_start_img, best_end_img = None, None
+
+    # Use a sliding window, moving by half the segment length each step
     step_size = max(1, segment_len_px // 2)
 
     if len(path) < segment_len_px:
+        # If the path is short, just use the endpoints
         if len(path) >= 2:
             r1, c1 = path[0]; r2, c2 = path[-1]
+            
             dx = float(c2 - c1); dy = float(r2 - r1)
             
-            if math.hypot(dx, dy) >= 5:
+            if math.hypot(dx, dy) >= 5: # Minimum length check
                 angle_rad = math.atan2(dy, dx)
                 angle_deg = normalize_angle(math.degrees(angle_rad))
                 max_tilt_deg = abs(angle_deg)
                 
                 best_start_img = (int(x_offset + c1), int(y_offset + r1))
                 best_end_img = (int(x_offset + c2), int(y_offset + r2))
+                
     else:
+        # Iterate over segments
         for i in range(0, len(path) - segment_len_px, step_size):
             start_point = path[i]; end_point = path[i + segment_len_px]
             
             r1, c1 = start_point; r2, c2 = end_point
+            
             dx = float(c2 - c1); dy = float(r2 - r1)
             
-            if math.hypot(dx, dy) < 5: continue
+            if math.hypot(dx, dy) < 5: continue # Skip very short segments
             
             angle_rad = math.atan2(dy, dx)
             angle_deg = normalize_angle(math.degrees(angle_rad))
+            
+            # Tilt is measured as the absolute angle from the horizontal/vertical axes
             current_tilt_deg = abs(angle_deg) 
             
             if current_tilt_deg > max_tilt_deg:
@@ -661,6 +734,7 @@ def calculate_segment_tilt(path, x_offset, y_offset, mm_per_pixel, segment_len_p
                 best_end_img = (int(x_offset + c2), int(y_offset + r2))
 
     if best_start_img and best_end_img:
+        # Calculate the length of the most tilted segment
         dx = best_end_img[0] - best_start_img[0]
         dy = best_end_img[1] - best_start_img[1]
         length_px = math.hypot(dx, dy)
@@ -670,25 +744,32 @@ def calculate_segment_tilt(path, x_offset, y_offset, mm_per_pixel, segment_len_p
     
     return 0.0, 0.0, None, None
 
+
 # -----------------------------
-# Analyze frame (The core logic)
+# Analyze frame
 # -----------------------------
 def analyze_frame(frame, last_pixels_per_mm=FALLBACK_PIXELS_PER_MM):
     pixels_per_mm_frame, frame_with_aruco = detect_aruco_and_pixels_per_mm(frame)
+    
+    # Use detected scale, otherwise use the last successful scale or fallback
     pixels_per_mm = pixels_per_mm_frame if pixels_per_mm_frame is not None else last_pixels_per_mm
     mm_per_pixel = 1.0 / pixels_per_mm
 
+    # YOLO detection
     results = model(frame, verbose=False)
-    if len(results) == 0: return frame_with_aruco, pixels_per_mm, None
+    if len(results) == 0:
+        return frame_with_aruco, pixels_per_mm, None
     res = results[0]
     bbox = get_largest_bbox_from_res(res)
-    if bbox is None: return frame_with_aruco, pixels_per_mm, None
+    if bbox is None:
+        return frame_with_aruco, pixels_per_mm, None
 
     x1,y1,x2,y2 = bbox
     x1 = clamp(x1, 0, frame.shape[1]-1); x2 = clamp(x2, 0, frame.shape[1]-1)
     y1 = clamp(y1, 0, frame.shape[0]-1); y2 = clamp(y2, 0, frame.shape[0]-1)
     roi = frame[y1:y2, x1:x2].copy()
-    if roi.size == 0: return frame_with_aruco, pixels_per_mm, None
+    if roi.size == 0:
+        return frame_with_aruco, pixels_per_mm, None
 
     # Image Processing (Grayscale, Thresholding, Skeletonization)
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -697,11 +778,14 @@ def analyze_frame(frame, last_pixels_per_mm=FALLBACK_PIXELS_PER_MM):
     _, thr = cv2.threshold(gray_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
     mask_bool = (thr > 0)
-    if np.count_nonzero(mask_bool) < 10: mask_bool = (~mask_bool)
+    if np.count_nonzero(mask_bool) < 10:
+        mask_bool = (~mask_bool) # Invert mask if object is dark on light background
     
     mask_bool = mask_bool.astype(bool)
-    try: skel = skeletonize(mask_bool).astype(np.uint8)
-    except Exception: skel = np.zeros_like(mask_bool, dtype=np.uint8)
+    try:
+        skel = skeletonize(mask_bool).astype(np.uint8)
+    except Exception:
+        skel = np.zeros_like(mask_bool, dtype=np.uint8)
         
     if np.count_nonzero(skel) == 0:
         out = frame_with_aruco.copy()
@@ -711,10 +795,12 @@ def analyze_frame(frame, last_pixels_per_mm=FALLBACK_PIXELS_PER_MM):
 
     # Wire Length and Path
     path, _ = trace_skeleton_path(skel) 
+    
+    # Use the robust method of counting non-zero skeleton pixels for length.
     length_px = float(np.count_nonzero(skel)) 
     length_cm = length_px * mm_per_pixel * MM_TO_CM
 
-    # PCA Tilt
+    # PCA Tilt (Overall tilt of the bounding box area)
     ys, xs = np.where(mask_bool)
     angle_deg_pca = 0.0
     if len(xs) >= 3:
@@ -723,15 +809,17 @@ def analyze_frame(frame, last_pixels_per_mm=FALLBACK_PIXELS_PER_MM):
             mean, eig = cv2.PCACompute(coords, mean=None)
             principal = eig[0]
             angle_deg_pca = normalize_angle(math.degrees(math.atan2(float(principal[1]), float(principal[0]))))
-        except Exception: angle_deg_pca = 0.0
+        except Exception:
+            angle_deg_pca = 0.0
 
-    # New: Tilt Segment Analysis
+    # New: Tilt Segment Analysis (Finds max tilt segment and its length)
     tilt_seg_deg, tilt_seg_len_cm, tilt_start_img, tilt_end_img = calculate_segment_tilt(
         path, x1, y1, mm_per_pixel, segment_len_px=70)
 
     # Original Special Deviation (A to B logic)
-    cx0 = roi.shape[1] / 2.0; cy0 = roi.shape[0] / 2.0
-    A_xy = (int(cx0), int(cy0)) 
+    cx0 = roi.shape[1] / 2.0
+    cy0 = roi.shape[0] / 2.0
+    A_xy = (int(cx0), int(cy0)) # A is the center of the bounding box
     
     endpoints_xy = [(c, r) for (r, c) in find_skeleton_endpoints(skel)]
     if endpoints_xy:
@@ -741,22 +829,25 @@ def analyze_frame(frame, last_pixels_per_mm=FALLBACK_PIXELS_PER_MM):
         p1 = (c1, r1); p2 = (c2, r2)
         B_xy = p1 if math.hypot(p1[0]-A_xy[0], p1[1]-A_xy[1]) > math.hypot(p2[0]-A_xy[0], p2[1]-A_xy[1]) else p2
     else:
-        B_xy = (A_xy[0] + 40, A_xy[1])
+        B_xy = (A_xy[0] + 40, A_xy[1]) # Fallback
 
     A_img = (int(x1 + A_xy[0]), int(y1 + A_xy[1]))
     B_img = (int(x1 + B_xy[0]), int(y1 + B_xy[1]))
 
-    a_px = math.hypot(B_xy[0] - A_xy[0], B_xy[1] - B_xy[1])
+    a_px = math.hypot(B_xy[0] - A_xy[0], B_xy[1] - A_xy[1])
     a_mm = a_px * mm_per_pixel
     ABx = float(B_xy[0] - A_xy[0])
     ABy = float(B_xy[1] - A_xy[1])
     
+    # Calculate Theta (Angle of vector AB relative to Y-axis)
     AB_angle_deg = math.degrees(math.atan2(ABy, ABx)) if a_px > 0 else 0.0
     theta_deg = abs(normalize_angle(AB_angle_deg - 90.0))
     theta_rad = math.radians(theta_deg)
     
+    # Special deviation formula
     special_dev_cm = math.sqrt(max(0.0, 2.0 * (a_mm ** 2) * (1.0 - math.cos(theta_rad)))) * MM_TO_CM
 
+    # Correct direction calculation
     vx, vy = ABx, ABy
     THRESH = 2
     if abs(vx) < THRESH: dir_x = ""
@@ -773,23 +864,28 @@ def analyze_frame(frame, last_pixels_per_mm=FALLBACK_PIXELS_PER_MM):
     else: direction = "None"
 
     measurement = {
-        "length_cm": round(float(length_cm), 4),
-        "overall_tilt_pca_deg": round(float(angle_deg_pca), 4),
-        "theta_dev_deg": round(float(theta_deg), 4),
-        "special_dev_cm": round(float(special_dev_cm), 4),
+        "length_cm": float(length_cm),
+        "overall_tilt_pca_deg": float(angle_deg_pca),
+        "theta_dev_deg": float(theta_deg),
+        "special_dev_cm": float(special_dev_cm),
         "direction": direction,
-        "max_segment_tilt_deg": round(float(tilt_seg_deg), 4),
-        "max_tilt_segment_len_cm": round(float(tilt_seg_len_cm), 4),
-        "pixels_per_mm": round(float(pixels_per_mm), 4)
+        "max_segment_tilt_deg": float(tilt_seg_deg),
+        "max_tilt_segment_len_cm": float(tilt_seg_len_cm),
+        "pixels_per_mm": float(pixels_per_mm)
     }
 
-    # Draw overlays (omitted for brevity, but include your drawing code here)
+    # Draw overlays
     out = frame_with_aruco.copy()
     cv2.rectangle(out, (x1,y1), (x2,y2), (0,255,0), 2)
+    
+    # Draw the skeleton in Cyan over the ROI
     roi_out = roi.copy()
-    roi_out[skel > 0] = (255, 255, 0)
+    roi_out[skel > 0] = (255, 255, 0) # Cyan (B,G,R)
+
+    # Put the processed ROI back into the output image
     out[y1:y2, x1:x2] = roi_out
 
+    # --- Full Wire Endpoint Calculation (Start/End of path) ---
     wire_start_img = None
     wire_end_img = None
     if len(path) >= 2:
@@ -797,121 +893,89 @@ def analyze_frame(frame, last_pixels_per_mm=FALLBACK_PIXELS_PER_MM):
         wire_start_img = (int(x1 + c1), int(y1 + r1))
         wire_end_img = (int(x1 + c2), int(y1 + r2))
 
+    # Draw special deviation line (A to B) (Marked in Yellow)
     cv2.drawMarker(out, A_img, (0,200,0), markerType=cv2.MARKER_CROSS, markerSize=12, thickness=2)
     cv2.line(out, A_img, B_img, (0,255,255), 2)
     
+    # Draw FULL WIRE ENDPOINTS (GREEN Star / RED Diamond)
     if wire_start_img and wire_end_img:
         cv2.drawMarker(out, wire_start_img, (0,255,0), markerType=cv2.MARKER_STAR, markerSize=8, thickness=2)
+        cv2.putText(out, "START", (wire_start_img[0] + 5, wire_start_img[1] - 5), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
         cv2.drawMarker(out, wire_end_img, (0,0,255), markerType=cv2.MARKER_DIAMOND, markerSize=8, thickness=2)
+        cv2.putText(out, "END", (wire_end_img[0] + 5, wire_end_img[1] + 15), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
 
+    # Draw MOST TILTED SEGMENT (HIGHLIGHTED MAGENTA/RED line)
     if tilt_start_img and tilt_end_img:
         cv2.line(out, tilt_start_img, tilt_end_img, (255,0,255), 5)
+        cv2.circle(out, tilt_start_img, 6, (255,0,255), -1)
+        cv2.circle(out, tilt_end_img, 6, (255,0,255), -1)
         
-    text_main = f"Len:{measurement['length_cm']:.3f}cm | PCA Tilt:{measurement['overall_tilt_pca_deg']:.2f}deg | Dev:{measurement['special_dev_cm']:.4f}cm | Dir:{direction}"
+        mid_x = (tilt_start_img[0] + tilt_end_img[0]) // 2
+        mid_y = (tilt_start_img[1] + tilt_end_img[1]) // 2
+        cv2.putText(out, "MAX TILT SEGMENT", (mid_x - 50, mid_y - 15), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,0,255), 1)
+
+    # Draw Text
+    text_main = f"Len:{length_cm:.3f}cm | PCA Tilt:{angle_deg_pca:.2f}deg | Dev:{special_dev_cm:.4f}cm | Dir:{direction}"
     cv2.putText(out, text_main, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2, cv2.LINE_AA)
     
-    text_tilt_seg = f"Max Seg Tilt:{measurement['max_segment_tilt_deg']:.2f}deg | Seg Len:{measurement['max_tilt_segment_len_cm']:.3f}cm"
+    text_tilt_seg = f"Max Seg Tilt:{tilt_seg_deg:.2f}deg | Seg Len:{tilt_seg_len_cm:.3f}cm"
     cv2.putText(out, text_tilt_seg, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2, cv2.LINE_AA)
     
-    cv2.putText(out, f"pix/mm:{measurement['pixels_per_mm']:.3f}", (10, out.shape[0]-12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1)
+    cv2.putText(out, f"pix/mm:{pixels_per_mm:.3f}", (10, out.shape[0]-12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1)
 
     return out, pixels_per_mm, measurement
 
 # -----------------------------
-# Analysis Orchestration Function for Flask (UPDATED)
+# Single Image Analysis Function (New entry point for Flask)
 # -----------------------------
-def analyze_all():
+def analyze_single_image(img_path: str, output_dir: str, filename: str):
     """
-    Processes all images in UPLOAD_FOLDER, calculates individual and batch average results,
-    saves all outputs, and clears UPLOAD_FOLDER.
-    Returns the name of the new results folder.
+    Analyzes a single image file and saves the result to the specified directory.
+    
+    :param img_path: Full path to the input image file.
+    :param output_dir: Directory where the output image and data will be saved.
+    :param filename: Original filename for naming the output file.
+    :return: A dictionary containing 'status' and 'measurement' data, or an error dict.
     """
-    image_files = [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith(IMAGE_EXTS)]
+    frame = cv2.imread(img_path)
     
-    if not image_files:
-        print(f"❌ No images found in '{UPLOAD_FOLDER}'.")
-        return None
-
-    # 1. Create a timestamped folder for this batch of results
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_folder_name = f"analysis_{timestamp}"
-    result_folder_path = os.path.join(RESULTS_DIR, result_folder_name)
-    os.makedirs(result_folder_path, exist_ok=True)
-    print(f"📂 Created results folder: {result_folder_name}")
-    
-    # Variables to store results
-    all_measurements = []
-    pixels_per_mm = FALLBACK_PIXELS_PER_MM 
-
-    # 2. Process all images
-    for filename in image_files:
-        img_path = os.path.join(UPLOAD_FOLDER, filename)
-        frame = cv2.imread(img_path)
+    if frame is None:
+        return {"status": "error", "message": f"Could not read image from path: {img_path}"}
         
-        if frame is None:
-            print(f"❌ Could not read image: {filename}. Skipping.")
-            continue
-            
-        try:
-            out, used_pix_per_mm, meas = analyze_frame(frame, pixels_per_mm)
-            
-            if used_pix_per_mm is not None and abs(used_pix_per_mm - FALLBACK_PIXELS_PER_MM) > 1e-6:
-                pixels_per_mm = used_pix_per_mm # Update scale for subsequent images
-
-            # Save the annotated image
-            result_path = os.path.join(result_folder_path, filename)
-            cv2.imwrite(result_path, out)
-            
-            if meas:
-                meas["filename"] = filename
-                all_measurements.append(meas)
-            print(f"✅ Processed {filename}. Results saved to {result_folder_name}.")
-
-        except Exception as e:
-            print(f"❌ An error occurred while processing {filename}: {e}")
-            continue
-
-    # --- 3. Save aggregated results (Individual and Average) ---
-    
-    # 3a. Save individual results (JSON and CSV)
-    summary_json_path = os.path.join(result_folder_path, "individual_summary.json")
-    with open(summary_json_path, "w") as f:
-        json.dump(all_measurements, f, indent=4)
-    print(f"📄 Saved individual JSON summary to {summary_json_path}")
-    
-    average_data = None
-    if all_measurements:
-        df = pd.DataFrame(all_measurements)
-        csv_path = os.path.join(result_folder_path, "wire_analysis_results.csv")
-        df.to_csv(csv_path, index=False)
-        print(f"📊 Saved CSV results to {csv_path}")
+    try:
+        # Use fallback scale for initial run
+        pixels_per_mm = FALLBACK_PIXELS_PER_MM 
         
-        # 3b. Calculate and save the Session Average 📈
-        numeric_cols = [
-            "length_cm", "overall_tilt_pca_deg", "theta_dev_deg", 
-            "special_dev_cm", "max_segment_tilt_deg", 
-            "max_tilt_segment_len_cm", "pixels_per_mm"
-        ]
+        # Pass the frame to the core analysis function
+        out, used_pix_per_mm, meas = analyze_frame(frame, pixels_per_mm)
         
-        # Only average columns that exist
-        cols_to_average = [col for col in numeric_cols if col in df.columns]
+        # Determine output file path (using PNG for annotated image)
+        base_name, _ = os.path.splitext(filename)
+        result_path = os.path.join(output_dir, f"{base_name}_result.png") 
         
-        if cols_to_average:
-            average_data = df[cols_to_average].mean().round(4).to_dict()
-            average_data["analysis_type"] = "session_average"
-            average_data["image_count"] = len(all_measurements)
-            
-            average_json_path = os.path.join(result_folder_path, "session_average.json")
-            with open(average_json_path, "w") as f:
-                json.dump(average_data, f, indent=4)
-            print(f"📈 Saved session average to {average_json_path}")
+        # Save the annotated image
+        cv2.imwrite(result_path, out)
+        
+        print(f"🖼️ Analysis result saved to: {result_path}")
+
+        if meas:
+            return {
+                "status": "success",
+                "measurement": meas
+            }
+        else:
+            return {"status": "error", "message": "Analysis failed to produce measurements (No wire/skeleton found)."}
+
+    except Exception as e:
+        error_message = f"An unexpected error occurred during analysis: {e}"
+        print(f"❌ {error_message}")
+        print(traceback.format_exc()) # Print stack trace for debugging
+        return {"status": "error", "message": error_message}
 
 
-    # 4. Clear the uploads folder (Automation step)
-    for filename in image_files:
-        try:
-            os.remove(os.path.join(UPLOAD_FOLDER, filename))
-        except Exception as e:
-            print(f"⚠️ Could not delete uploaded file {filename}: {e}")
-
-    return result_folder_name
+# -----------------------------
+# Removed the old 'main' execution block
+# -----------------------------

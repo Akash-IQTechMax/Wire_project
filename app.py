@@ -153,18 +153,21 @@
 
 
 
+
+
+
 from flask import Flask, request, jsonify, send_from_directory, Response
 from werkzeug.utils import secure_filename
 import os
 import time
 from datetime import datetime
+# Import the new function for single file analysis
+from deviation_check import analyze_single_image 
 import json
-from deviation_check import analyze_all 
 
 # --------------------------------------------
 # CONFIG
 # --------------------------------------------
-# Render looks for a file/directory structure exactly like this.
 UPLOAD_FOLDER = "uploads"
 RESULTS_DIR = "results"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -172,85 +175,71 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 app = Flask(__name__)
 
-# --- FIX: New Root Route for Health Check and Home Page ---
-@app.route('/', methods=['GET'])
-def home_status():
-    """Provides a clear status for Render health checks and home access."""
-    return jsonify({"status": "Server is running and ready for processing", 
-                    "endpoints": ["/upload (POST)", "/analyze (GET)"]}), 200
-
-# --------------------------------------------
-# STATUS ENDPOINT (Kept for compatibility)
-# --------------------------------------------
 @app.route('/getStatus')
 def get_status():
-    return jsonify({"status": "Server is running!"}), 200
+    return 'Server is running!'
 
 # --------------------------------------------
-# FILE UPLOAD ENDPOINT (No change)
+# FILE UPLOAD & ANALYSIS ENDPOINT
 # --------------------------------------------
-@app.route('/upload', methods=['POST'])
-def upload_image():
-    """Accept image uploads from iPad/Unity."""
+@app.route('/upload_and_analyze', methods=['POST'])
+def upload_and_analyze_image():
+    """Accept image, save it, run analysis on it, and return the results."""
+    start_time = time.time()
+    
+    # 1. File Upload Check
     if 'file' not in request.files:
-        return jsonify({"status": "error", "message": "No file uploaded"}), 400
+        return jsonify({"status": "error", "message": "No file part in the request"}), 400
 
     file = request.files['file']
-    # If the client sends an empty filename field
     if file.filename == '':
         return jsonify({"status": "error", "message": "No selected file"}), 400
         
     filename = secure_filename(file.filename)
+    if not filename:
+        return jsonify({"status": "error", "message": "Invalid filename"}), 400
+        
+    # Create a unique results folder for this run
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    current_results_folder = os.path.join(RESULTS_DIR, timestamp)
+    os.makedirs(current_results_folder, exist_ok=True)
+    
+    # Save the uploaded file
     save_path = os.path.join(UPLOAD_FOLDER, filename)
     file.save(save_path)
 
-    print(f"✅ Uploaded: {filename}")
-    return jsonify({"status": "success", "filename": filename, "path": f"/uploads/{filename}"}), 200
-
-
-# --------------------------------------------
-# ANALYSIS ENDPOINT (No functional change, minor cleanup)
-# --------------------------------------------
-@app.route('/analyze', methods=['GET'])
-def analyze_all_images():
-    """Run the wire deviation analysis on all uploaded images."""
-    start_time = time.time()
-    print("\n🚀 Starting batch wire deviation analysis...")
+    print(f"\n✅ Uploaded: {filename}")
+    print(f"🚀 Starting analysis for: {filename}")
 
     try:
-        latest_folder_name = analyze_all()
-
-        if not latest_folder_name:
-            # Return a success code (200) with a warning status
-            return jsonify({"status": "warning", "message": "No images available for analysis"}), 200
-
-        latest_folder_path = os.path.join(RESULTS_DIR, latest_folder_name)
+        # 2. Trigger analysis for the SINGLE uploaded image
+        # We pass the full path, output folder, and filename
+        analysis_result = analyze_single_image(
+            img_path=save_path, 
+            output_dir=current_results_folder, 
+            filename=filename
+        )
         
-        # Load the results
-        with open(os.path.join(latest_folder_path, "individual_summary.json"), 'r') as f:
-            individual_results = json.load(f)
-
-        session_average = {}
-        average_summary_path = os.path.join(latest_folder_path, "session_average.json")
-        if os.path.exists(average_summary_path):
-             with open(average_summary_path, 'r') as f:
-                 session_average = json.load(f)
-        
+        # 3. Handle Analysis Success or Failure
+        if analysis_result is None or analysis_result.get("status") == "error":
+            raise Exception(analysis_result.get("message", "Unknown analysis error"))
+            
+        # 4. Format the Response
         elapsed_time = time.time() - start_time
-        print(f"✅ Analysis completed successfully in {elapsed_time:.2f} seconds.")
         
-        # Construct the final response
+        # Get the measurement dictionary directly from the analysis result
+        measurement_data = analysis_result.get("measurement", {})
+        
         response_data = {
             "status": "success",
+            "filename": filename,
+            "results_folder": os.path.basename(current_results_folder),
             "processing_time_sec": round(elapsed_time, 2),
-            "results_folder": f"/results/{latest_folder_name}",
-            "session_average": session_average, 
-            "individual_results": individual_results, 
-            "individual_summary_file": f"/results/{latest_folder_name}/individual_summary.json",
-            "average_summary_file": f"/results/{latest_folder_name}/session_average.json",
-            "csv_file": f"/results/{latest_folder_name}/wire_analysis_results.csv"
+            "measurement": measurement_data,
+            "annotated_image_file": f"/results/{os.path.basename(current_results_folder)}/{filename}_result.png"
         }
         
+        print(f"✅ Analysis completed successfully in {elapsed_time:.2f} seconds.")
         return Response(
             json.dumps(response_data, ensure_ascii=False, indent=4),
             mimetype="application/json"
@@ -261,46 +250,31 @@ def analyze_all_images():
         print(f"❌ Error during analysis after {elapsed_time:.2f} seconds: {e}")
         return jsonify({
             "status": "error",
-            "message": f"Analysis failed: {str(e)}",
-            "processing_time_sec": round(elapsed_time, 2)
+            "message": str(e),
+            "processing_time_sec": round(elapsed_time, 2),
+            "filename": filename
         }), 500
 
 
 # --------------------------------------------
-# STATIC FILE ROUTES (No change)
+# STATIC FILE ROUTES (Kept for serving results/uploads)
 # --------------------------------------------
-@app.route('/results/<path:filename>')
-def serve_results(filename):
-    return send_from_directory(RESULTS_DIR, filename)
+@app.route('/results/<folder_name>/<filename>')
+def serve_results(folder_name, filename):
+    return send_from_directory(os.path.join(RESULTS_DIR, folder_name), filename)
 
 @app.route('/uploads/<path:filename>')
 def serve_uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
-@app.route('/list_uploads', methods=['GET'])
-def list_uploaded_images():
-    """Return a JSON list of all image filenames in the uploads folder."""
-    try:
-        image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
-        image_files = [f for f in os.listdir(UPLOAD_FOLDER) if f.lower().endswith(image_extensions)]
-
-        return jsonify({
-            "status": "success",
-            "count": len(image_files),
-            "images": image_files
-        }), 200
-
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
-
+# The other endpoints (`/analyze`, `/list_uploads`, `parse_summary_text_to_json`) 
+# are removed as they are not needed for the single-file analysis flow.
+# You can keep them if you need batch processing, but the primary flow is the new one.
 
 # --------------------------------------------
-# RUN SERVER (For Local Testing Only)
+# RUN SERVER
 # --------------------------------------------
 if __name__ == "__main__":
-    # Note: Render uses Gunicorn, which handles the binding. 
-    # This is for local development only.
+    # In a production environment like Render, you might not use debug=True
+    # and instead use a WSGI server like Gunicorn.
     app.run(host="0.0.0.0", port=8080, debug=True)
