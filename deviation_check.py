@@ -3032,7 +3032,7 @@ from skimage.morphology import skeletonize
 # CONFIG
 # -----------------------------
 # 🎯 CHANGE APPLIED HERE: Using your specified absolute path for the YOLO model.
-MODEL_PATH = r"C:\yolo_copper\runs\detect\copper_wire\weights\best.pt" 
+MODEL_PATH = "yolov8s-seg.pt" 
 UPLOAD_FOLDER = "uploads"
 RESULTS_DIR = "results"
 
